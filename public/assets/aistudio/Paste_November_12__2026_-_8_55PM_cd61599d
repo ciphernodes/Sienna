@@ -1,0 +1,437 @@
+# 📱 MASTER PLAN: Personal AI Project Assistant (Claude UI × Gemini)
+
+Purpose: Personal-use, sideloaded Android app that replicates Claude's interface, uses Gemini as the engine, and acts as a full coding/modding assistant with deep device and file access. One user (you). No Play Store constraints.
+
+---
+
+## 1. CORE CONCEPT & STARTUP FLOW
+
+Mission: "I type a command → the AI reads my project, makes the changes, runs the build, installs it, and watches the logs."
+
+Launch sequence:
+1. Splash → Claude-styled warm cream screen
+2. Workspace selection → folder picker (SAF) or raw path (adb-granted storage)
+3. API key entry → stored in EncryptedSharedPreferences backed by Android Keystore
+4. Model/route selection → default model + permission mode (Read-only / Ask / Auto)
+5. Main chat → with action trace, diff viewer, and toolbar
+
+---
+
+## 2. 🎨 CLAUDE APPEARANCE (DESIGN SYSTEM)
+
+| Token | Value | Rule |
+|---|---|---|
+| Background | #faf9f5 | Never pure white |
+| Primary text | #141413 | Never pure black |
+| Secondary text | #87867f / #b0aea5 | |
+| Borders | #f0eee6 | Cream-tinted |
+| Accent | #d97757 | Clay orange, sparing use |
+
+- Typography: Source Serif 4 (display) + Inter (UI)
+- Reference repos: minedmap/claude-droid (streaming chat, tool-call cards), larsmartens/claude-android-ui (mobile layout), Anthropic Figma UI kit
+- Components: chat bubbles, collapsible tool-call cards, code blocks with copy button, diff viewer, action trace lines, changed-files drawer
+
+---
+
+## 3. 🔌 FILE ACCESS & LARGE FILE ARCHITECTURE
+
+### 3.1 Access Tiers (auto-selected)
+
+| Tier | Mechanism | Scope |
+|---|---|---|
+| 1. SAF | ACTION_OPEN_DOCUMENT_TREE | Selected folder + subdirs (Play-safe) |
+| 2. adb grant | MANAGE_EXTERNAL_STORAGE via adb shell appops | Full /sdcard as real java.io.File paths |
+| 3. Root / Shizuku | libsu or Shizuku API | /data/, /system/, other app data dirs |
+
+- Path sandbox: every model-returned path resolves and must stay inside the granted tree (unless "escalate outside workspace" is explicitly toggled)
+- Binary guard: MIME detection before reading — refuse images/APKs/zips as text
+- Zero-width file channel: read other apps' data dirs on supported devices without root
+
+### 3.2 Large File Strategy (must support 100+ MB files)
+
+Constraint: Gemini's 1M-token context cannot absorb 100 MB files (≈25M+ tokens). The app must never attempt a full-context load of large files. Files of any size are accessed via tiered read strategies.
+
+| File size | Strategy |
+|---|---|
+| ≤ 200 KB | Full read into context |
+| 200 KB – 5 MB | Line-range reads + grep; no full load unless explicitly requested |
+| 5 MB – 100 MB | Local FTS5 index + targeted line-range reads + streaming hash for staleness |
+| > 100 MB | Memory-mapped window reads only; never load whole file; pipe through external tools (ripgrep / strings / awk) via shell |
+
+### 3.3 Large File Infrastructure
+- Memory-mapped file access (MappedByteBuffer) for windowed reads — files > 100 MB read only the requested byte range
+- Streaming SHA-256 for staleness detection — never load full file to compute hash
+- Local SQLite FTS5 index stored in app-private storage, per-workspace, rebuildable
+- Background indexing worker — index large folders while user chats
+- Tool result cap of ~100 KB per call; larger results require pagination
+- Token/cost HUD shows "large-file mode active" when a read is partial
+
+### 3.4 Large File Behavior Per File Type
+- Text files (code, smali, dump.cs, logs): line-range + grep only above 5 MB; index once, then search_index
+- Binary files (.so, .dat, .obb, assets): never read as text; use read_bytes windows (max 1 MB per call) or hex view
+- Archives (APK, ZIP, UnityFS, OBB): never load; zip_list builds a virtual tree, zip_read_entry reads individual entries
+- libil2cpp.so (50–150 MB): read_bytes windows for ELF header/section analysis
+- global-metadata.dat (20–100 MB): handled by Il2CppDumper; AI reads dump.cs output, not raw metadata
+- dump.cs (50–200 MB): index_file → search_index; line-range reads for context
+- Asset bundles (100 MB–2 GB): extracted entries only; never full-load
+
+---
+
+## 4. 🔐 PERMISSIONS & SYSTEM ACCESS ARCHITECTURE
+
+### 4.1 The "777" Reality on Android
+Android does not have a Unix-style chmod 777 for apps. Filesystem access is a layered system of manifest permissions, special app access grants (Settings pages), and privileged escalation (ADB/Shizuku/Root). The app must request all three layers to achieve maximum practical access.
+
+### 4.2 Storage Access (All Files & Folders)
+
+| Permission | Type | What It Grants | How to Grant |
+|---|---|---|---|
+| MANAGE_EXTERNAL_STORAGE | Special app access (Settings) | Read/write all files in shared storage (internal + SD card + OTG), including /sdcard/Android/ subdirs (except other apps' private dirs) | Manifest declaration + ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION intent to system Settings |
+| READ_EXTERNAL_STORAGE | Runtime (≤ API 32) | Legacy read access to shared storage | Runtime dialog (older devices) |
+| WRITE_EXTERNAL_STORAGE | Runtime (≤ API 29) | Legacy write access to shared storage | Runtime dialog (older devices) |
+| READ_MEDIA_IMAGES | Runtime (API 33+) | Read images from shared storage | Runtime dialog (granular media permission) |
+
+ADB grant command for full storage:
+adb shell appops set --uid <PACKAGE_NAME> MANAGE_EXTERNAL_STORAGE allow
+
+What MANAGE_EXTERNAL_STORAGE still cannot access: other apps' private data directories (/data/data/<other_app>) and their app-specific external dirs (/sdcard/Android/data/<other_app>). Those require Shizuku or Root.
+
+### 4.3 Special App Access (Settings-Granted Permissions)
+
+| Permission | Purpose | How to Grant |
+|---|---|---|
+| SYSTEM_ALERT_WINDOW | Draw overlays on top of other apps (floating UI, ESP overlays, agent status HUD) | System Settings page (ACTION_MANAGE_OVERLAY_PERMISSION); cannot be granted via runtime dialog |
+| REQUEST_INSTALL_PACKAGES | Install APKs from within the app (rebuild → sign → install pipeline) | Manifest + per-source user approval (Android 8.0+) |
+| WRITE_SECURE_SETTINGS | Modify system settings (auto-enable wireless debugging, toggle accessibility services) | adb shell pm grant <PACKAGE_NAME> android.permission.WRITE_SECURE_SETTINGS |
+| PACKAGE_USAGE_STATS | Read app usage statistics (monitor target games) | Settings → Special app access → Usage access |
+| ACCESS_NOTIFICATION_POLICY | Control Do Not Disturb (silent background builds) | Manifest + Settings grant (optional) |
+
+### 4.4 Background Execution & Persistence
+
+| Permission | Purpose |
+|---|---|
+| FOREGROUND_SERVICE | Required for long-lived background tasks (builds, indexing, agent loops) |
+| FOREGROUND_SERVICE_SPECIAL_USE | Declare a specialized foreground service type for the agent (API 34+) |
+| FOREGROUND_SERVICE_DATA_SYNC | Background file indexing and sync operations |
+| POST_NOTIFICATIONS | Foreground service notifications and agent approval prompts (API 33+) |
+| RECEIVE_BOOT_COMPLETED | Auto-start agent service after reboot (restore scheduled routines, watchers) |
+| WAKE_LOCK | Keep CPU awake during long builds, downloads, instrumentation sessions |
+| SCHEDULE_EXACT_ALARM | Precise timing for scheduled routines |
+
+### 4.5 Package & App Visibility
+
+| Permission | Purpose | When Needed |
+|---|---|---|
+| QUERY_ALL_PACKAGES | Query all installed apps (detect CODM/MLBB by package name, enumerate modding targets) | Essential for game profile auto-detection. Alternative: <queries> intent filters targeting known game packages to avoid the broad permission |
+
+### 4.6 Network & Connectivity
+
+| Permission | Purpose |
+|---|---|
+| INTERNET | Gemini API calls, web search, URL context, dependency audit |
+| ACCESS_NETWORK_STATE | Detect network availability before API calls |
+| ACCESS_WIFI_STATE | Detect WiFi for ADB-over-WiFi pairing (optional) |
+
+### 4.7 Accessibility Service (Computer Use / Screen Automation)
+Allows reading screen content of any app and injecting gestures — used for testing mods, navigating game UIs, or Computer Use.
+
+| Service Attribute | Purpose |
+|---|---|
+| canRetrieveWindowContent | Read view hierarchy of any app on screen |
+| canPerformGestures | Simulate taps, swipes, long-presses in other apps |
+| canTakeScreenshot | Capture screenshots of the current screen |
+| accessibilityEventTypes="typeAllMask" | Receive all accessibility events from all apps |
+
+Declaration: AndroidManifest.xml → <service android:name=".AgentAccessibilityService" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"> with accessibility-service.xml config.
+
+### 4.8 Privileged Escalation Paths (Beyond Manifest Permissions)
+
+| Path | Access Level | How to Enable | What It Unlocks |
+|---|---|---|---|
+| ADB (appops) | Shell (UID 2000) | adb shell appops set ... commands | MANAGE_EXTERNAL_STORAGE, WRITE_SECURE_SETTINGS, package installation, shell commands |
+| Shizuku | Shell (UID 2000) | Install Shizuku app → start via ADB or root → grant moe.shizuku.manager.permission.API_V23 | Full shell access, app_process APIs, install/uninstall, settings manipulation, /data/local/tmp access |
+| Root (libsu) | UID 0 | Device must be rooted (Magisk/KernelSU/APatch) | Full /data/, /system/, other apps' private dirs, kernel-level operations |
+
+Shizuku integration permissions to declare:
+- moe.shizuku.manager.permission.API_V23 — runtime permission for Shizuku binder access
+- Shizuku provider declaration in AndroidManifest.xml
+
+### 4.9 Complete AndroidManifest.xml Permission Block
+
+<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+<uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+<uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+<uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+<uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
+### 4.10 First-Run Permission Request Flow
+1. Storage first — request MANAGE_EXTERNAL_STORAGE via Settings intent; show ADB fallback command
+2. Shizuku/Root detection — check if Shizuku binder is available; if not, offer ADB setup instructions
+3. Notifications — request POST_NOTIFICATIONS (API 33+)
+4. Overlay — request SYSTEM_ALERT_WINDOW (only if floating UI/ESP features are used)
+5. Install permission — request REQUEST_INSTALL_PACKAGES (only when first APK install is attempted)
+6. Accessibility — request only when Computer Use or screen automation is first triggered
+7. Battery optimization exemption — REQUEST_IGNORE_BATTERY_OPTIMIZATIONS for long-running background agents
+
+### 4.11 What Each Tier Unlocks for CODM/MLBB
+
+| Capability | SAF only | + MANAGE_EXTERNAL_STORAGE | + Shizuku | + Root |
+|---|---|---|---|---|
+| Read APK from /sdcard | ✅ | ✅ | ✅ | ✅ |
+| Write to /sdcard/Android/data/ | ❌ | ❌ (blocked) | ✅ | ✅ |
+| Read /data/local/tmp | ❌ | ❌ | ✅ | ✅ |
+| Read other apps' /data/data/ | ❌ | ❌ | ❌ | ✅ |
+| Install APK silently | ❌ | ❌ | ✅ (Shizuku) | ✅ |
+| Dump memory of running game | ❌ | ❌ | ⚠️ (process attach may still be blocked) | ✅ (ptrace) |
+| Modify /system/ | ❌ | ❌ | ❌ | ✅ |
+
+---
+
+## 5. 🛠️ TOOL SET (GEMINI FUNCTION CALLING)
+
+Read tools:
+- list_directory, read_file, glob_files, grep / ripgrep, read_bytes(path, offset, len)
+
+Large file tools:
+- file_stat(path) → size, line_count (streamed), sha256 (streamed), mime — no full load
+- read_lines(path, start, end) → line range for text files
+- grep_large(path, pattern, context_lines) → ripgrep-backed; returns byte offsets + snippets
+- read_bytes(path, offset, len) → binary window (max 1 MB per call)
+- index_file(path) → build SQLite FTS5 index locally
+- search_index(query, path_prefix) → search indexed files without loading
+- tail_file(path, n) → last N lines (logcat-style)
+- pipe_to_shell(path, shell_cmd) → stream file through strings/grep/awk without loading into context
+
+Write tools (all approval-gated by default):
+- write_file, edit_file, delete_file (→ trash), create_folder, patch_bytes, move_file, copy_file
+
+Execution tools:
+- run_shell_command (Termux RUN_COMMAND intent, runs in workspace cwd)
+- tail_logcat(package), install_apk, uninstall_app
+- background_start / background_status / background_kill (long-running processes)
+
+Domain tools:
+- git_status / diff / log / commit / stash / branch
+- apk_decompile / apk_build / apk_sign / apk_install
+- jadx_decompile, read_smali_class, find_method, xref
+- zip_list, zip_read_entry, zip_patch_entry (respects resources.arsc stored-not-deflated rule)
+- arsc_decode, binary_xml_decode, nine_patch_decode
+- frida_run(script), memory_search(pattern)
+- web_search (Google Search grounding), fetch_url (URL context)
+- code_exec (sandboxed Python for computation)
+- scan_vulnerabilities, audit_dependencies
+- generate_image (Nano Banana / Imagen)
+
+API-level features to use:
+- Parallel function calling with stable UUIDs
+- Streaming function-call arguments (streamFunctionCallArguments) for progress UI
+- JSON Schema tool definitions (portable)
+- Context caching for large repeated workspaces
+
+---
+
+## 6. 🔒 TRUST LAYER (BUILD FIRST)
+
+- Diff approval gate — line-level green/red diff per edit; buttons: Apply / Reject / Apply All This Turn
+- Turn snapshots — files affected in a turn copied to app-private storage → "Undo this turn"
+- Trash instead of delete — .ai/trash/<timestamp>/, restorable from drawer
+- Git auto-checkpoint — ai-checkpoint: <summary> commit before every AI turn if .git exists
+- Rollback records — every write/edit produces a one-tap rollback record
+- Staleness detection — streaming hash on read; re-check before applying edit; warn on conflict
+- Permission modes — Read-only / Ask / Auto, persisted per session
+- Dangerous-pattern confirmation — rm -rf /, dd, > /dev/block, pm uninstall, format require a second tap
+- APK signature safeguard — refuse install if signature ≠ installed package (unless flagged "replace install")
+- Credential vault — keys in Keystore; logs auto-scrubbed of sk-, ghp_, PEM patterns
+
+---
+
+## 7. 🧭 CONTROL & EFFICIENCY UX
+
+- Plan-then-execute mode — checklist plan first, approve, then step-by-step execution
+- Dry-run toggle — model emits tool calls, app intercepts and displays without executing
+- Live action trace — streaming lines: 📖 Reading src/App.kt → ✏️ Editing 2 lines → $ gradle assembleDebug → ✓
+- End-of-turn summary card — "3 created, 2 edited, 1 deleted" with tappable files
+- Changed-files drawer — tree with ● modified / + created / − deleted since session start
+- Command history — up-arrow recall
+- Canned commands / slash commands — /rebuild-install-logcat, /decompile-patch, /bump-version-resign
+- Quick-open (Ctrl+P style) — fuzzy file search to attach files
+- Split view — chat top, diff/file viewer bottom
+- Terminal key bar — Ctrl Esc Tab ↑↓←→ / | above input
+
+---
+
+## 8. 🧠 MEMORY & CONTEXT MANAGEMENT
+
+- .ai/instructions.md — auto-loaded system-prompt appendix every session (build commands, quirks, keystore path, package name, "don't touch X")
+- .ai/memory.md — AI appends durable notes; you can edit; compounds over weeks
+- Auto-memory — persist facts across sessions automatically
+- Soft/hard compaction — summarize when context fills, continue seamlessly, no 400 errors
+- Token/cost/latency HUD — live context usage; route cheap model for reads, strong model for refactors
+- Checkpoints & /rewind — rewind conversation + file state to any prior checkpoint
+- Context caching — cache large workspace text for repeated Q&A
+- Large-file context guardrail — any read > 5 MB forces line-range/grep mode; tool results capped at 100 KB
+
+---
+
+## 9. 🤖 AGENTIC LOOPS & AUTONOMY
+
+Self-healing build loop (highest priority):
+build → capture errors → feed back to Gemini → AI edits → rebuild → repeat until pass
+
+APK pipeline (one command):
+apktool d → AI edits smali/XML/res → apktool b → zipalign → apksigner sign → adb install -r → logcat watch
+
+Plan → Execute:
+Multi-step tasks get a checklist plan first; execution checks off items.
+
+Subagent teams:
+Lead agent splits task → specialized subagents (researcher / coder / tester / reviewer) in parallel → merge results.
+
+Self-repair loop:
+Executor → Tester → Reviewer iterate with structured feedback until all pass.
+
+Worktree isolation:
+Risky changes run in isolated git worktrees; you pick the winner.
+
+Proactive / background agency:
+- Notification-driven agent — background service attaches to notification channel; build failures / crashes trigger a proposed fix; approval from lock screen
+- Proactive background mode — agent runs while you use your phone; approvals arrive as notifications
+- Scheduled routines — "every 9am, scan for TODOs and dependency updates"
+- Ultraplan / background watcher — tail training runs, babysit CI, auto-fix dev server crashes
+
+Hooks & skills:
+- Lifecycle hooks — before_tool_call, after_file_write, on_build_failure, before_commit; can block secrets from entering context
+- Hot-reloadable skills — .ai/skills/*.md loaded on demand (smali-editing, APK-signing, gradle-diagnosis); edit live
+- Custom slash commands — personal workflow palette
+
+---
+
+## 10. 🎮 MODDING PIPELINE DETAIL
+
+- Termux + proot-distro (Ubuntu) — full apt, gcc, node, wine in app-private storage; reset to clean state freely
+- APK round-trip with correct resources.arsc compression, .9.png handling, binary XML ↔ text
+- Smali-aware tools — read_smali_class, find_method, xref, ripgrep-backed search
+- jadx decompile on demand — reason about Java/Kotlin without storing all decompiled source
+- Hex/binary patch — read + patch .so files, saves, OBBs with approval
+- Archive inspector — virtual ZIP/APK/OBB tree; edit text entries in place
+- Resource helpers — resources.arsc, AndroidManifest.xml, localization XMLs
+- Logcat monitor — tail_logcat(package) streams filtered logs; crashes land in context automatically
+- Frida hooks — generate script → push → run via shell → stream console
+- Accessibility screen operation — dump hierarchy, simulate taps to test a mod in another app
+- Computer Use (GA) — model views screen and generates actions; operating another app's UI
+
+---
+
+## 11. 🛡️ SECURITY & CODE HYGIENE
+
+- Automated code review before accepting diffs — hardcoded keys, PII leaks, unsafe input handling
+- CVE & dependency audit — npm/pip/Cargo/Go/Ruby; changelogs fetched; grouped by risk
+- CodeMender-style vulnerability fixing — scan_vulnerabilities() → propose_patch() → approval
+- Optional Snyk-style extension hook for industrial scanning
+
+---
+
+## 12. 📱 INTERFACE & ERGONOMICS (MOBILE)
+
+- Monitor tool — dedicated background stream view (logcat, gradle --continuous, frida)
+- Share-sheet intake — "Edit with Project Assistant" from other apps
+- Completion notifications — for long builds/turns
+- Remote control — check a running session from another device
+
+---
+
+## 13. 🎯 TARGET GAME PROFILES: CODM & MLBB
+
+Both targets are Unity IL2CPP. The core pipeline (Il2CppDumper → offline analysis → Frida/memory patch) applies to both. The game profile layer tells the agent which anti-cheat posture it is operating under and adjusts tool selection accordingly.
+
+### 13.1 CODM (Call of Duty Mobile)
+- Engine: Unity IL2CPP
+- Anti-cheat: Tencent ACE (kernel driver, process monitoring)
+- Primary constraint: Offline metadata may be encrypted/protected → memory-dump-first workflow
+- Tools:
+  - CodMDumper / GameGuardian → memory-dump libil2cpp.so + global-metadata.dat
+  - Il2CppDumper-for-COD → dedicated fork with Android relocations support
+  - frida-il2cpp-bridge → runtime dump if memory dump is blocked
+- Risk level: HIGH. Kernel-level detection. Test accounts only for runtime hooks.
+
+### 13.2 MLBB (Mobile Legends: Bang Bang)
+- Engine: Unity IL2CPP
+- Anti-cheat: Moonton in-house (active ban waves, 30-year bans)
+- Primary constraint: Runtime memory manipulation is heavily monitored → asset-layer patching is the dominant low-risk path
+- Tools:
+  - libtool2.0 → Shizuku-based UnityFS v7 patcher + native IL2CPP reflection (no root)
+  - mlbb-esp-ksu pattern → external /proc/pid/mem reader + SurfaceFlinger overlay (no code injection)
+  - Standard Il2CppDumper workflow for offset extraction
+- Risk level: MEDIUM-HIGH. Asset patches on test accounts preferred; runtime hooks carry ban risk.
+
+### 13.3 Agent Behavior When a Game Profile Is Detected
+When the user selects a workspace containing com.activision.callofduty.shooter or com.mobile.legends, the app auto-suggests the matching profile:
+- CODM → default to memory-dump toolchain, warn before any Frida attach
+- MLBB → default to asset-inspection toolchain (UnityFS listing/parsing), offer external-read pattern before suggesting injection
+- Both → surface a banner: "This target has kernel/active anti-cheat. Runtime operations should be treated as test-account-only."
+
+---
+
+## 14. 🗺️ BUILD ORDER (DEPENDENCY-ORDERED, NO TIMELINE)
+
+Phase 1 — Skeleton:
+Storage access (adb grant) → permission request flow → workspace picker → API key → chat UI with Claude theme → list_directory + read_file + file_stat + read_lines
+
+Phase 2 — Large file infrastructure:
+Memory-mapped reads → streaming hash → SQLite FTS5 index → index_file + search_index + grep_large + read_bytes → background indexing worker
+
+Phase 3 — Mutation loop:
+Snapshots/undo → write_file + edit_file + diff approval → delete_file → permission modes → trash → action trace → end-of-turn summary
+
+Phase 4 — Execution:
+Termux shell tool → .ai/instructions.md auto-load → self-healing build loop → git auto-checkpoint → changed-files drawer
+
+Phase 5 — Modding pipeline:
+APK decompile → build → sign → install → logcat as one saved command → hex patch → archive inspector
+
+Phase 6 — Game profiles:
+CODM memory-dump toolchain → MLBB asset-inspection toolchain → auto-profile detection → anti-cheat warning banner
+
+Phase 7 — Privileged escalation:
+Shizuku binder integration → Root (libsu) detection → silent APK install → /data/local/tmp access → other-app data read (root) → Accessibility service wiring
+
+Phase 8 — Intelligence:
+Plan mode → compaction → token/cost HUD → auto-memory → search grounding → URL context → dependency audit
+
+Phase 9 — Autonomy:
+Hooks + skills → subagents → proactive notification agent → scheduled routines → Frida → accessibility/Computer Use
+
+Phase 10 — Polish:
+Monitor, remote control, Snyk hook, worktree isolation, /rewind
+
+---
+
+## 15. ⚠️ REALISTIC WARNINGS
+
+- The phased order above is deliberate — each phase is independently useful, so the app is usable before it is complete.
+- Large file infrastructure is Phase 2, not a later addition — CODM and MLBB assets routinely exceed 100 MB, and retrofitting memory-mapped reads + FTS5 indexing after the write tools ship is expensive.
+- Phase 3 (diffs + undo) is non-negotiable before any write tool ships. Shipping writes without undo will cost you a project.
+- Skip shell until Phase 4 — rm -rf from a misread prompt is the #1 way this app destroys your work.
+- Termux must be installed and its RUN_COMMAND intent permission configured for the shell tool.
+- Root is optional — Shizuku + adb grant covers 80% of modding needs, but true /data/data/ access and silent installs at full capability require root or Shizuku.
+- MANAGE_EXTERNAL_STORAGE does not grant access to /sdcard/Android/data/ — Shizuku or root is required for that path.
+- Gemini 4 Argon context is 1,048,576 tokens unified (input + output + thinking + function calls) — the HUD and compaction are essential, not cosmetic.
+- Never attempt a full-context read of any file > 5 MB — the token math makes it impossible and the app must refuse rather than truncate silently.
+- Accessibility service is the highest-risk permission surface — gate it behind an explicit toggle and never enable it silently.
+- QUERY_ALL_PACKAGES is a broad permission; if you want to minimize it, use <queries> intent filters for known game packages instead.

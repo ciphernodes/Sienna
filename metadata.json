@@ -1,0 +1,6 @@
+{
+  "name": "Sienna AI Assistant",
+  "description": "Sienna: Autonomous mobile AI developer assistant featuring live floating action trace HUD, SAF workspace tree access, SQLite FTS5 code search, and visual diff approval.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
