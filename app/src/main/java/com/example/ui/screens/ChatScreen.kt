@@ -44,7 +44,9 @@ fun ChatScreen(
     onRefreshWorkspaceFiles: () -> Unit,
     onIndexWorkspaceFts: () -> Unit,
     onOpenWorkspacePicker: () -> Unit,
-    onOpenKeySettings: () -> Unit
+    onOpenKeySettings: () -> Unit,
+    onOpenFridaStudio: () -> Unit = {},
+    onOpenAutomation: () -> Unit = {}
 ) {
     var inputText by remember { mutableStateOf("") }
     var showPermissionMenu by remember { mutableStateOf(false) }
@@ -258,34 +260,57 @@ fun ChatScreen(
                     )
 
                     // Quick Shortcut Chips Row
-                    Row(
+                    androidx.compose.foundation.lazy.LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        AssistChip(
-                            onClick = { showSearchDrawer = true },
-                            label = { Text("FTS Search") },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(14.dp)) }
-                        )
-                        AssistChip(
-                            onClick = { onSendMessage("Check git status and branch summary") },
-                            label = { Text("Git Status") },
-                            leadingIcon = { Icon(Icons.Default.AccountTree, contentDescription = null, modifier = Modifier.size(14.dp)) }
-                        )
-                        AssistChip(
-                            onClick = { showExportModal = true },
-                            label = { Text("Export Log") },
-                            leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(14.dp)) }
-                        )
-                        if (uiState.canUndoTurn) {
+                        item {
                             AssistChip(
-                                onClick = onUndoTurn,
-                                label = { Text("Undo last turn") },
-                                leadingIcon = { Icon(Icons.Default.Undo, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                                onClick = { showSearchDrawer = true },
+                                label = { Text("FTS Search") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            )
+                        }
+                        item {
+                            AssistChip(
+                                onClick = onOpenFridaStudio,
+                                label = { Text("Frida Hooking") },
+                                leadingIcon = { Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(14.dp)) },
                                 colors = AssistChipDefaults.assistChipColors(labelColor = ClaudeAccentClay)
                             )
+                        }
+                        item {
+                            AssistChip(
+                                onClick = onOpenAutomation,
+                                label = { Text("UI Automation") },
+                                leadingIcon = { Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            )
+                        }
+                        item {
+                            AssistChip(
+                                onClick = { onSendMessage("Check git status and branch summary") },
+                                label = { Text("Git Status") },
+                                leadingIcon = { Icon(Icons.Default.AccountTree, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            )
+                        }
+                        item {
+                            AssistChip(
+                                onClick = { showExportModal = true },
+                                label = { Text("Export Log") },
+                                leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            )
+                        }
+                        if (uiState.canUndoTurn) {
+                            item {
+                                AssistChip(
+                                    onClick = onUndoTurn,
+                                    label = { Text("Undo last turn") },
+                                    leadingIcon = { Icon(Icons.Default.Undo, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                                    colors = AssistChipDefaults.assistChipColors(labelColor = ClaudeAccentClay)
+                                )
+                            }
                         }
                     }
 

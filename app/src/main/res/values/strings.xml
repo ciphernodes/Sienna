@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Sienna</string>
+    <string name="accessibility_service_description">Sienna Accessibility Automation Service for layout mapping and automated UI test sequence recording.</string>
 </resources>

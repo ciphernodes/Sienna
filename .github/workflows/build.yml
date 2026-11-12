@@ -25,6 +25,13 @@ jobs:
       - name: Grant Execute Permission for Gradle
         run: chmod +x gradle || true
 
+      - name: Ensure Debug Keystore Exists
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            echo "Generating debug.keystore for GitHub Actions build environment..."
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Decode Signing Keystore from GitHub Secrets
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -33,7 +40,7 @@ jobs:
             echo "$KEYSTORE_BASE64" | base64 --decode > $RUNNER_TEMP/release.keystore
             echo "Keystore decoded successfully."
           else
-            echo "No KEYSTORE_BASE64 secret found. Skipping keystore decode."
+            echo "No KEYSTORE_BASE64 secret found. Will fallback to debug.keystore for build signing."
           fi
 
       - name: Build Signed APK with Gradle
@@ -44,6 +51,11 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/release.keystore" ]; then
             export KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
+          else
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/debug.keystore"
+            export STORE_PASSWORD="android"
+            export KEY_ALIAS="androiddebugkey"
+            export KEY_PASSWORD="android"
           fi
           gradle assembleDebug assembleRelease --stacktrace
 

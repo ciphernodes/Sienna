@@ -553,6 +553,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun addTrace(line: String) {
         _uiState.update { it.copy(actionTrace = (it.actionTrace + line).takeLast(20)) }
+        com.example.overlay.OverlayHudManager.updateTrace(line)
     }
 
     private fun String?.isNull_or_blank_key(): Boolean {

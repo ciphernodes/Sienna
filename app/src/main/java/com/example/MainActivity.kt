@@ -84,7 +84,9 @@ fun ProjectAssistantApp(
                 onRefreshWorkspaceFiles = { viewModel.refreshWorkspaceFiles() },
                 onIndexWorkspaceFts = { viewModel.indexWorkspaceFts() },
                 onOpenWorkspacePicker = { navController.navigate("workspace") },
-                onOpenKeySettings = { navController.navigate("keys") }
+                onOpenKeySettings = { navController.navigate("keys") },
+                onOpenFridaStudio = { navController.navigate("frida") },
+                onOpenAutomation = { navController.navigate("automation") }
             )
         }
 
@@ -101,6 +103,18 @@ fun ProjectAssistantApp(
             ApiKeyScreen(
                 currentApiKey = uiState.apiKey,
                 onSaveKey = { newKey -> viewModel.saveApiKey(newKey) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("frida") {
+            com.example.ui.screens.FridaInstrumentationScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("automation") {
+            com.example.ui.screens.AutomationScreen(
                 onBack = { navController.popBackStack() }
             )
         }
