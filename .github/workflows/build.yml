@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build & Sign Testing APK
+    name: Build Testing APK
     runs-on: ubuntu-latest
 
     steps:
@@ -28,47 +28,15 @@ jobs:
       - name: Ensure Debug Keystore Exists
         run: |
           if [ ! -f "debug.keystore" ]; then
-            echo "Generating debug.keystore for GitHub Actions build environment..."
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Decode Signing Keystore from GitHub Secrets
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > $RUNNER_TEMP/release.keystore
-            echo "Keystore decoded successfully."
-          else
-            echo "No KEYSTORE_BASE64 secret found. Will fallback to debug.keystore for build signing."
-          fi
-
-      - name: Build Signed APK with Gradle
-        env:
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          if [ -f "$RUNNER_TEMP/release.keystore" ]; then
-            export KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
-          else
-            export KEYSTORE_PATH="$GITHUB_WORKSPACE/debug.keystore"
-            export STORE_PASSWORD="android"
-            export KEY_ALIAS="androiddebugkey"
-            export KEY_PASSWORD="android"
-          fi
-          gradle assembleDebug assembleRelease --stacktrace
+      - name: Build Debug APK with Gradle
+        run: gradle assembleDebug --stacktrace
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Sienna-App-Debug-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: warn
-
-      - name: Upload Release APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Sienna-App-Release-APK
-          path: app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: warn
+          if-no-files-found: error
